@@ -15,7 +15,9 @@
 
 #include "data_tag.h"
 #include "mongoose.h"
+#include "jsmn.h"
 #include "data.h"
+#include "list.h"
 #include "optparse.h"
 #include "fileformat.h"
 #include "fatal.h"
@@ -27,6 +29,7 @@ typedef struct gpsd_client {
     char address[253 + 6 + 1]; // dns max + port
     char const *init_str;
     char const *filter_str;
+    list_t includes;
     char msg[1024]; // GPSd TPV should about 600 bytes
 } gpsd_client_t;
 
@@ -174,6 +177,7 @@ data_tag_t *data_tag_create(char *param, struct mg_mgr *mgr)
         char *host = gpsd_mode ? "localhost" : NULL;
         char *port = gpsd_mode ? "2947" : NULL;
         char *opts = hostport_param(param, &host, &port);
+        list_t includes = {0};
 
         // default to GPSd JSON
         char const *mode = gpsd_mode ? "GPSd JSON" : "TCP custom";
@@ -197,9 +201,12 @@ data_tag_t *data_tag_create(char *param, struct mg_mgr *mgr)
             else if (!strcasecmp(key, "filter")) {
                 filter_str = val;
             }
-            else {
+            else if (val) {
                 fprintf(stderr, "Invalid key \"%s\" option.\n", key);
                 exit(1);
+            }
+            else {
+                list_push(&includes, key);
             }
         }
 
@@ -211,6 +218,7 @@ data_tag_t *data_tag_create(char *param, struct mg_mgr *mgr)
         fprintf(stderr, "Getting %s data from %s port %s\n", mode, host, port);
 
         tag->gpsd_client = gpsd_client_init(host, port, init_str, filter_str, mgr);
+        list_push_all(&tag->gpsd_client->includes, includes.elems);
     }
     else {
         if (!tag->key)
@@ -232,8 +240,40 @@ data_t *data_tag_apply(data_tag_t *tag, data_t *data, char const *filename)
 {
     char const *val = tag->val;
     if (tag->gpsd_client) {
-        // TODO: if tag->includes then filter keys, else
         val = tag->gpsd_client->msg;
+        list_t *inc = &tag->gpsd_client->includes;
+        if (inc->len) {
+            jsmn_parser parser = {0};
+            jsmn_init(&parser);
+            jsmntok_t tok[128] = {0};
+            int toks = jsmn_parse(&parser, val, strlen(val), tok, 128);
+            if (toks < 1 || tok[0].type != JSMN_OBJECT) {
+                fprintf(stderr, "invalid json (%d): %s\n", toks, val);
+                return data; // invalid json
+            }
+            // check all tokens
+            char buf[1024] = {0};
+            for (int i = 1; i < toks; ++i) {
+                jsmntok_t *k = tok + i;
+                jsmntok_t *v = tok + i + 1;
+                i += k->size + v->size;
+                //fprintf(stderr, "TOK (%d %d) %.*s : (%d %d) %.*s\n",
+                //        k->type, k->size, k->end - k->start, val + k->start,
+                //        v->type, v->size, v->end - v->start, val + v->start);
+
+                // check all includes
+                for (void **iter = inc->elems; iter && *iter; ++iter) {
+                    char const *key = *iter;
+                    if (strncmp(key, val + k->start, k->end - k->start) == 0) {
+                        strncpy(buf, val + v->start, v->end - v->start);
+                        data = data_append(data,
+                                key, "", DATA_STRING, buf,
+                                NULL);
+                    }
+                }
+            }
+            return data;
+        }
     }
     else if (filename && !strcmp("PATH", tag->val)) {
         val = filename;
