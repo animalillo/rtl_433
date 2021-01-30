@@ -25,21 +25,21 @@ typedef struct gpsd_client {
     struct mg_connection *conn;
     int prev_status;
     char address[253 + 6 + 1]; // dns max + port
-    int json_mode;
+    char const *init_str;
+    char const *filter_str;
     char msg[1024]; // GPSd TPV should about 600 bytes
 } gpsd_client_t;
 
+// GPSd JSON mode
 char const watch_json[] = "?WATCH={\"enable\":true,\"json\":true}\n";
+char const filter_json[] = "{\"class\":\"TPV\",";
+// GPSd NMEA mode
 char const watch_nmea[] = "?WATCH={\"enable\":true,\"nmea\":true}\n";
+char const filter_nmea[] = "$GPGGA,";
 
 static void gpsd_client_line(gpsd_client_t *ctx, char *line)
 {
-    // JSON mode
-    if (strncmp(line, "{\"class\":\"TPV\",", 15) == 0) {
-        strncpy(ctx->msg, line, sizeof(ctx->msg) - 1);
-    }
-    // NMEA mode
-    if (strncmp(line, "$GPGGA,", 7) == 0) {
+    if (!ctx->filter_str || strncmp(line, ctx->filter_str, strlen(ctx->filter_str)) == 0) {
         strncpy(ctx->msg, line, sizeof(ctx->msg) - 1);
     }
 }
@@ -60,10 +60,8 @@ static void gpsd_client_event(struct mg_connection *nc, int ev, void *ev_data)
         if (connect_status == 0) {
             // Success
             fprintf(stderr, "GPSd Connected...\n");
-            if (ctx->json_mode) {
-                mg_send(nc, watch_json, sizeof(watch_json));
-            } else {
-                mg_send(nc, watch_nmea, sizeof(watch_nmea));
+            if (ctx->init_str) {
+                mg_send(nc, ctx->init_str, strlen(ctx->init_str));
             }
         }
         else {
@@ -116,7 +114,7 @@ static struct mg_connection *gpsd_client_connect(gpsd_client_t *ctx, struct mg_m
     return ctx->conn;
 }
 
-static gpsd_client_t *gpsd_client_init(char const *host, char const *port, int json_mode, struct mg_mgr *mgr)
+static gpsd_client_t *gpsd_client_init(char const *host, char const *port, char const *init_str, char const *filter_str, struct mg_mgr *mgr)
 {
     gpsd_client_t *ctx;
     ctx = calloc(1, sizeof(gpsd_client_t));
@@ -131,7 +129,8 @@ static gpsd_client_t *gpsd_client_init(char const *host, char const *port, int j
     else
         snprintf(ctx->address, sizeof(ctx->address), "%s:%s", host, port);
 
-    ctx->json_mode = json_mode;
+    ctx->init_str = init_str;
+    ctx->filter_str = filter_str;
     ctx->connect_opts.user_data = ctx;
 
     if (!gpsd_client_connect(ctx, mgr)) {
@@ -166,16 +165,20 @@ data_tag_t *data_tag_create(char *param, struct mg_mgr *mgr)
         tag->key = NULL;
     }
 
-    if (strncmp(tag->val, "gpsd", 4) == 0) {
+    int gpsd_mode = strncmp(tag->val, "gpsd", 4) == 0;
+    if (gpsd_mode || strncmp(tag->val, "tcp:", 4) == 0) {
         if (!tag->key)
-            tag->key = "gps";
+            tag->key = gpsd_mode ? "gps" : "tag";
 
         param      = arg_param(tag->val); // strip scheme
-        char *host = "localhost";
-        char *port = "2947";
+        char *host = gpsd_mode ? "localhost" : NULL;
+        char *port = gpsd_mode ? "2947" : NULL;
         char *opts = hostport_param(param, &host, &port);
 
-        int json_mode = 1; // default to JSON
+        // default to GPSd JSON
+        char const *mode = gpsd_mode ? "GPSd JSON" : "TCP custom";
+        char const *init_str = gpsd_mode ? watch_json : NULL;
+        char const *filter_str = gpsd_mode ? filter_json : NULL;
         // parse format options
         char *key, *val;
         while (getkwargs(&opts, &key, &val)) {
@@ -183,17 +186,31 @@ data_tag_t *data_tag_create(char *param, struct mg_mgr *mgr)
             val = trim_ws(val);
             if (!key || !*key)
                 continue;
-            else if (!strcasecmp(key, "nmea"))
-                json_mode = 0;
+            else if (!strcasecmp(key, "nmea")) {
+                mode       = "GPSd NMEA";
+                init_str   = watch_nmea;
+                filter_str = filter_nmea;
+            }
+            else if (!strcasecmp(key, "init")) {
+                init_str = val;
+            }
+            else if (!strcasecmp(key, "filter")) {
+                filter_str = val;
+            }
             else {
                 fprintf(stderr, "Invalid key \"%s\" option.\n", key);
                 exit(1);
             }
         }
 
-        fprintf(stderr, "Getting GPSd data (%s) from %s port %s\n", json_mode ? "JSON" : "NMEA", host, port);
+        if (!host || !port) {
+            fprintf(stderr, "Host or port for tag client missing!\n");
+            exit(1);
+        }
 
-        tag->gpsd_client = gpsd_client_init(host, port, json_mode, mgr);
+        fprintf(stderr, "Getting %s data from %s port %s\n", mode, host, port);
+
+        tag->gpsd_client = gpsd_client_init(host, port, init_str, filter_str, mgr);
     }
     else {
         if (!tag->key)
