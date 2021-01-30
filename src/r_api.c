@@ -1024,5 +1024,5 @@ void add_infile(r_cfg_t *cfg, char *in_file)
 
 void add_data_tag(struct r_cfg *cfg, char *param)
 {
-    list_push(&cfg->data_tags, data_tag_create(param));
+    list_push(&cfg->data_tags, data_tag_create(param, get_mgr(cfg)));
 }

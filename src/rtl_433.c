@@ -232,7 +232,12 @@ static void help_tags(void)
     term_help_printf(
             "\t\t= Data tags option =\n"
             "  [-K FILE | PATH | <tag> | <key>=<value>] Add an expanded token or fixed tag to every output line.\n"
-            "\tIf <tag> or <value> is \"FILE\" or \"PATH\" an expanded token will be added.\n");
+            "\tIf <tag> or <value> is \"FILE\" or \"PATH\" an expanded token will be added.\n"
+            "\tThe <tag> or <value> can also be a GPSd URL, e.g.\n"
+            "\t\t\"-K gpsd\" (json TPV report, default \"gps\" key)\n"
+            "\t\t\"-K foo=gpsd://127.0.0.1:2947\" (with key and address)\n"
+            "\t\t\"-K bar=gpsd,nmea\" (NMEA GPGGA report)\n"
+            "\t\t\"-K gpsd://127.0.0.1:2947,lat,lon\" (only dedicated lat and lon keys)\n");
     exit(0);
 }
 
